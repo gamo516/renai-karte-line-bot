@@ -55,7 +55,7 @@ async function handleEvent(event) {
 // ---------- 友だち追加：診断スタート ----------
 async function handleFollow(event) {
   const userId = event.source.userId;
-  store.upsertUser(userId, {
+  await store.upsertUser(userId, {
     registeredAt: store.todayISO(),
     questionIndex: 0,
     tagCounts: { A: 0, B: 0, C: 0, D: 0 },
@@ -94,20 +94,20 @@ async function handlePostback(event) {
   if (action !== "answer") return null;
 
   const tag = data.get("tag");
-  const user = store.getUser(userId) || store.upsertUser(userId, {});
+  const user = (await store.getUser(userId)) || (await store.upsertUser(userId, {}));
   const tagCounts = Object.assign({ A: 0, B: 0, C: 0, D: 0 }, user.tagCounts);
   tagCounts[tag] = (tagCounts[tag] || 0) + 1;
   const nextIndex = (user.questionIndex || 0) + 1;
 
   if (nextIndex < questions.length) {
-    store.upsertUser(userId, { tagCounts, questionIndex: nextIndex });
+    await store.upsertUser(userId, { tagCounts, questionIndex: nextIndex });
     const nextQ = buildQuestionMessage(questions[nextIndex], nextIndex);
     return client.replyMessage({ replyToken: event.replyToken, messages: [nextQ] });
   }
 
   // 全問回答済み：最終タグを確定（同数の場合はA>B>C>Dの優先順）
   const finalTag = resolveTag(tagCounts);
-  store.upsertUser(userId, {
+  await store.upsertUser(userId, {
     tagCounts,
     questionIndex: nextIndex,
     finalTag,
