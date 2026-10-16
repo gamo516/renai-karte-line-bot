@@ -7,6 +7,7 @@ const questions = require("./lib/questions");
 const resultTypes = require("./lib/resultTypes");
 const store = require("./lib/store");
 const { runDailyStepBroadcast } = require("./lib/stepRunner");
+const pages = require("./lib/pages");
 
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -26,6 +27,9 @@ const app = express();
 
 // ヘルスチェック用（ホスティング先の death監視や動作確認に使う）
 app.get("/", (req, res) => res.send("renai-karte-line-bot is running"));
+
+// 公開ページ（タイプ別解説・運営者情報・プライバシーポリシー）
+pages.mount(app);
 
 app.post("/webhook", line.middleware(config), (req, res) => {
   Promise.all((req.body.events || []).map(handleEvent))
