@@ -37,6 +37,9 @@ app.get("/", (req, res) => res.send("renai-karte-line-bot is running"));
 // 公開ページ（タイプ別解説・悩み別ページ・相性表・運営者情報など）
 pages.mount(app);
 
+// Xのアイコン・ヘッダー画像（スマホから保存できるように公開）
+app.use("/brand", express.static(require("path").join(__dirname, "public", "brand")));
+
 // LINE内リンクの計測用リダイレクト。初回クリック日時を記録してから公開ページへ飛ばす
 app.get("/r", async (req, res) => {
   const { u, d, s } = req.query;
