@@ -54,7 +54,7 @@ app.get("/r", async (req, res) => {
 
 // 会社PCのX投稿自動生成スクリプトが参考投稿を取得するためのAPI
 app.get("/admin/refs", async (req, res) => {
-  if (!process.env.ADMIN_CODE || req.query.code !== process.env.ADMIN_CODE) return res.status(403).end();
+  if (!(await admin.checkCode(req.query.code))) return res.status(403).end();
   res.json(await admin.listRefs());
 });
 
@@ -196,29 +196,10 @@ function resolveTag(tagCounts) {
   return best;
 }
 
-// ---------- 管理者機能（参考投稿の保存・返信案の作成） ----------
+// ---------- 管理者機能（受付箱に入れるだけ。処理は会社PCでまとめて行う） ----------
 async function handleAdminAction(event, mode) {
-  const userId = event.source.userId;
-  try {
-    await client.showLoadingAnimation({ chatId: userId, loadingSeconds: 60 });
-  } catch (_) {
-    // 読み込み表示は失敗しても処理は続ける
-  }
-  let messages;
-  try {
-    messages = await admin.handleAdminPostback(event, mode, blobClient);
-  } catch (err) {
-    console.error("[admin] 失敗", err);
-    messages = [{ type: "text", text: "うまく処理できませんでした。もう一度送ってみてください。" }];
-  }
-  if (!messages) return null;
-  try {
-    return await reply(event, messages);
-  } catch (err) {
-    // AIの処理が長引いて返信トークンの期限が切れた場合だけプッシュで送る
-    console.error("[admin] reply失敗、pushで再送", (err && err.message) || err);
-    return client.pushMessage({ to: userId, messages });
-  }
+  const messages = await admin.handleAdminPostback(event, mode);
+  return messages ? reply(event, messages) : null;
 }
 
 // ---------- メッセージ受信 ----------
@@ -227,7 +208,7 @@ async function handleMessage(event) {
     const registered = await admin.tryRegister(event.source.userId, event.message.text.trim());
     if (registered) return reply(event, [{ type: "text", text: registered }]);
   }
-  const adminReply = await admin.handleAdminMessage(event);
+  const adminReply = await admin.handleAdminMessage(event, blobClient);
   if (adminReply) return reply(event, adminReply);
   if (event.message.type === "text") return handleText(event);
   return null;
