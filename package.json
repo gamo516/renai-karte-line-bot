@@ -14,11 +14,13 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.135.0",
     "@line/bot-sdk": "^11.3.0",
     "@upstash/redis": "^1.39.0",
     "dotenv": "^18.0.7",
     "express": "^5.3.0",
-    "node-cron": "^4.6.0"
+    "node-cron": "^4.6.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "localtunnel": "^2.0.2"

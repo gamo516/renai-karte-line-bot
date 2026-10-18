@@ -9,6 +9,7 @@ const pages = require("./lib/pages");
 const msg = require("./lib/messages");
 const { WORRIES, HITOKOTO } = require("./lib/content");
 const { runDailyFollowups, runMonthlyBroadcast } = require("./lib/followups");
+const admin = require("./lib/admin");
 
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -21,6 +22,10 @@ if (!config.channelAccessToken || !config.channelSecret) {
 }
 
 const client = new line.messagingApi.MessagingApiClient({
+  channelAccessToken: config.channelAccessToken,
+});
+
+const blobClient = new line.messagingApi.MessagingApiBlobClient({
   channelAccessToken: config.channelAccessToken,
 });
 
@@ -47,6 +52,12 @@ app.get("/r", async (req, res) => {
   res.redirect(302, d);
 });
 
+// 会社PCのX投稿自動生成スクリプトが参考投稿を取得するためのAPI
+app.get("/admin/refs", async (req, res) => {
+  if (!process.env.ADMIN_CODE || req.query.code !== process.env.ADMIN_CODE) return res.status(403).end();
+  res.json(await admin.listRefs());
+});
+
 app.post("/webhook", line.middleware(config), (req, res) => {
   Promise.all((req.body.events || []).map(handleEvent))
     .then(() => res.status(200).end())
@@ -61,7 +72,7 @@ async function handleEvent(event) {
     if (event.type === "follow") return await handleFollow(event);
     if (event.type === "unfollow") return await store.upsertUser(event.source.userId, { blocked: true });
     if (event.type === "postback") return await handlePostback(event);
-    if (event.type === "message" && event.message.type === "text") return await handleText(event);
+    if (event.type === "message") return await handleMessage(event);
     return null;
   } catch (err) {
     console.error("[handleEvent] error", event.type, err);
@@ -111,6 +122,8 @@ async function handlePostback(event) {
   const user = (await store.getUser(userId)) || (await store.upsertUser(userId, {}));
 
   switch (action) {
+    case "admin":
+      return handleAdminAction(event, data.get("mode"));
     case "answer":
       return handleAnswer(event, user, data);
     case "resume":
@@ -181,6 +194,43 @@ function resolveTag(tagCounts) {
     if (tagCounts[t] > tagCounts[best]) best = t;
   }
   return best;
+}
+
+// ---------- 管理者機能（参考投稿の保存・返信案の作成） ----------
+async function handleAdminAction(event, mode) {
+  const userId = event.source.userId;
+  try {
+    await client.showLoadingAnimation({ chatId: userId, loadingSeconds: 60 });
+  } catch (_) {
+    // 読み込み表示は失敗しても処理は続ける
+  }
+  let messages;
+  try {
+    messages = await admin.handleAdminPostback(event, mode, blobClient);
+  } catch (err) {
+    console.error("[admin] 失敗", err);
+    messages = [{ type: "text", text: "うまく処理できませんでした。もう一度送ってみてください。" }];
+  }
+  if (!messages) return null;
+  try {
+    return await reply(event, messages);
+  } catch (err) {
+    // AIの処理が長引いて返信トークンの期限が切れた場合だけプッシュで送る
+    console.error("[admin] reply失敗、pushで再送", (err && err.message) || err);
+    return client.pushMessage({ to: userId, messages });
+  }
+}
+
+// ---------- メッセージ受信 ----------
+async function handleMessage(event) {
+  if (event.message.type === "text") {
+    const registered = await admin.tryRegister(event.source.userId, event.message.text.trim());
+    if (registered) return reply(event, [{ type: "text", text: registered }]);
+  }
+  const adminReply = await admin.handleAdminMessage(event);
+  if (adminReply) return reply(event, adminReply);
+  if (event.message.type === "text") return handleText(event);
+  return null;
 }
 
 // ---------- キーワード応答（通数0） ----------
