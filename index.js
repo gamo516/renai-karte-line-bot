@@ -109,10 +109,9 @@ async function handleFollow(event) {
   const intro = {
     type: "text",
     text:
-      "友だち追加ありがとうございます、恋愛カルテです。\n\n" +
-      "5つの質問・30秒で、あなたの恋愛タイプと「恋のクセ」がわかります。\n\n" +
-      "診断を終えた方には、タイプ別の「恋のクセ解説」をプレゼントしています。\n\n" +
-      "直感で答えてOKです。さっそく1問目からどうぞ。",
+      "追加ありがとう、こただよ。\n\n" +
+      "5つの質問・30秒で、あなたの恋のクセがわかる診断つくったの。最後まで答えてくれたら、タイプ別の「恋のクセ解説」も渡すね。\n\n" +
+      "考えすぎず、直感でいいよ。さっそく1問目！",
   };
   return reply(event, [intro, msg.questionMessage(0)]);
 }
@@ -130,11 +129,11 @@ async function handlePostback(event) {
     case "answer":
       return handleAnswer(event, user, data);
     case "resume":
-      if (user.finalTag) return reply(event, [{ type: "text", text: "診断はもう完了しています。メニューの「私のタイプ解説」から結果を見られます。" }]);
+      if (user.finalTag) return reply(event, [{ type: "text", text: "診断はもう終わってるよ。メニューの「私のタイプ解説」からいつでも見られるからね。" }]);
       return reply(event, [msg.questionMessage(Math.min(user.questionIndex || 0, questions.length - 1))]);
     case "restart":
       await store.upsertUser(userId, freshDiagnosis());
-      return reply(event, [{ type: "text", text: "もう一度、今のあなたの恋愛タイプを答え合わせしましょう。" }, msg.questionMessage(0)]);
+      return reply(event, [{ type: "text", text: "もう一回、今のあなたの恋のクセを答え合わせしよ。" }, msg.questionMessage(0)]);
     case "worry": {
       const key = data.get("w");
       if (!WORRIES[key]) return null;
@@ -142,15 +141,15 @@ async function handlePostback(event) {
       return reply(event, [msg.worryAnswer(userId, key)]);
     }
     case "askworry":
-      return reply(event, [msg.worryQuestion("今いちばん気になっている恋愛の悩みはどれですか？")]);
+      return reply(event, [msg.worryQuestion("今いちばん気になってるのはどれ？")]);
     case "mytype":
       if (!user.finalTag) {
-        return reply(event, [{ type: "text", text: "まだ診断が終わっていないようです。続きからどうぞ。" }, msg.questionMessage(Math.min(user.questionIndex || 0, questions.length - 1))]);
+        return reply(event, [{ type: "text", text: "まだ診断の途中みたい。続きからいこ！" }, msg.questionMessage(Math.min(user.questionIndex || 0, questions.length - 1))]);
       }
       return reply(event, [msg.resultCard(userId, user.finalTag)]);
     case "hitokoto": {
       const text = HITOKOTO[Math.floor(Math.random() * HITOKOTO.length)];
-      return reply(event, [{ type: "text", text: `今日のひとこと\n\n${text}` }]);
+      return reply(event, [{ type: "text", text: `今日のこたから、ひとこと\n\n${text}` }]);
     }
     default:
       return null;
@@ -184,7 +183,7 @@ async function handleAnswer(event, user, data) {
   });
 
   return reply(event, [
-    { type: "text", text: "お疲れさまでした！あなたの恋愛タイプが出ました。" },
+    { type: "text", text: "おつかれさま！あなたのタイプ、出たよ。" },
     msg.resultCard(userId, finalTag),
     msg.worryQuestion(),
   ]);
@@ -222,7 +221,7 @@ async function handleText(event) {
   const text = (event.message.text || "").trim();
   const userId = event.source.userId;
   if (/相性/.test(text)) {
-    return reply(event, [msg.linkCard("タイプ別相性表", "タイプ別相性表", "4つの恋愛タイプ同士の相性をまとめました。", "相性表を見る", msg.trackedUrl(userId, "/aisho"))]);
+    return reply(event, [msg.linkCard("タイプ別相性表", "タイプ別相性表", "4つのタイプ同士の相性、まとめてみたよ。", "相性表を見る", msg.trackedUrl(userId, "/aisho"))]);
   }
   if (/^(カルテ|診断|再診断)$/.test(text)) {
     await store.upsertUser(userId, freshDiagnosis());
