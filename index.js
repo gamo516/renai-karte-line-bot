@@ -91,6 +91,7 @@ function freshDiagnosis() {
   return {
     questionIndex: 0,
     tagCounts: { A: 0, B: 0, C: 0, D: 0 },
+    answers: [],
     finalTag: null,
     diagnosisCompletedAt: null,
   };
@@ -166,17 +167,19 @@ async function handleAnswer(event, user, data) {
   const tag = data.get("tag");
   const tagCounts = Object.assign({ A: 0, B: 0, C: 0, D: 0 }, user.tagCounts);
   tagCounts[tag] = (tagCounts[tag] || 0) + 1;
+  const answers = [...(user.answers || []), tag];
   const nextIndex = current + 1;
 
   if (nextIndex < questions.length) {
-    await store.upsertUser(userId, { tagCounts, questionIndex: nextIndex });
+    await store.upsertUser(userId, { tagCounts, answers, questionIndex: nextIndex });
     return reply(event, [msg.questionMessage(nextIndex)]);
   }
 
-  // 全問回答済み：最終タグを確定（同数の場合はA>B>C>Dの優先順）
-  const finalTag = resolveTag(tagCounts);
+  // 全問回答済み：最終タグを確定
+  const finalTag = resolveTag(tagCounts, answers);
   await store.upsertUser(userId, {
     tagCounts,
+    answers,
     questionIndex: nextIndex,
     finalTag,
     diagnosisCompletedAt: store.todayISO(),
@@ -189,13 +192,15 @@ async function handleAnswer(event, user, data) {
   ]);
 }
 
-function resolveTag(tagCounts) {
-  const order = ["A", "B", "C", "D"];
-  let best = order[0];
-  for (const t of order) {
-    if (tagCounts[t] > tagCounts[best]) best = t;
+// いちばん多いタイプ。同点なら、後の設問ほど本音に近いとみなして、最後に選んだほうを優先する
+function resolveTag(tagCounts, answers) {
+  const max = Math.max(...Object.values(tagCounts));
+  const tied = Object.keys(tagCounts).filter((t) => tagCounts[t] === max);
+  if (tied.length === 1) return tied[0];
+  for (let i = answers.length - 1; i >= 0; i--) {
+    if (tied.includes(answers[i])) return answers[i];
   }
-  return best;
+  return tied[0];
 }
 
 // ---------- 管理者機能（受付箱に入れるだけ。処理は会社PCでまとめて行う） ----------

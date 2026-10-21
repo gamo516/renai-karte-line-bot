@@ -15,7 +15,7 @@ const CELLS = [
   { label: "もう一度診断する", sub: "今の恋愛タイプは？", icon: "🔄", action: { type: "postback", data: "action=restart", displayText: "もう一度診断する" } },
   { label: "タイプ別相性表", sub: "あの人との相性", icon: "💞", action: { type: "uri", uri: `${BASE}/aisho` } },
   { label: "相談先の選び方", sub: "ひとりで抱えこまない", icon: "☎️", action: { type: "uri", uri: `${BASE}/guide` } },
-  { label: "お悩み別ヒント", sub: "片思い・復縁・出会い", icon: "💡", action: { type: "postback", data: "action=askworry", displayText: "お悩み別ヒント" } },
+  { label: "お悩み別ヒント", sub: "復縁・片思い・曖昧な関係", icon: "💡", action: { type: "postback", data: "action=askworry", displayText: "お悩み別ヒント" } },
   { label: "今日のひとこと", sub: "毎日タップしてね", icon: "🔮", action: { type: "postback", data: "action=hitokoto", displayText: "今日のひとこと" }, highlight: true },
 ];
 
