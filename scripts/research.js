@@ -74,7 +74,18 @@ async function collect(group, today) {
   return list.filter((_, i) => !seen[i]);
 }
 
-function prompt({ A, B, C, recent = [] }) {
+// reply-feedback.js が実績から抽出した「反応が良かったリプの傾向」をプロンプト用の文章にする
+function insightsText(ins) {
+  const lines = [`実績から分かったこと（実際に送ったリプ${ins.basedOn.replies}件の反応から${ins.provisional ? "。件数が少ないので参考程度" : ""}）:`];
+  if (ins.summary) lines.push(`- 傾向: ${ins.summary}`);
+  for (const g of ins.good || []) lines.push(`- 反応が良い: ${g}`);
+  for (const a of ins.avoid || []) lines.push(`- 避ける: ${a}`);
+  for (const e of ins.editLessons || []) lines.push(`- 運用者の好み: ${e}`);
+  for (const x of ins.examples || []) lines.push(`- 反応が良かった実例（言い回しはそのまま真似しない）: 元投稿「${x.original}」→「${x.reply}」（${x.why}）`);
+  return lines.join("\n");
+}
+
+function prompt({ A, B, C, recent = [], insights = null }) {
   const fmt = (p, i, tag) =>
     `${tag}${i + 1}. [投稿${hoursSince(p.createdAt).toFixed(1)}時間前 / いいね${p.likes} 返信${p.replies} 引用${p.quotes} 保存${p.bookmarks ?? "?"} 表示${p.views ?? "?"}${p.followers != null ? ` / 投稿者フォロワー${p.followers}` : ""} / 勢い${velocity(p).toFixed(1)}/h] ${p.text.replace(/\n/g, " / ")}`;
   return `あなたは恋愛系Xアカウント「こた」（@kota_0517）の運用チームです。今日集めたXの投稿を3つの作業で処理してください。
@@ -95,11 +106,18 @@ ${A.map((p, i) => fmt(p, i, "A")).join("\n")}
 フォロワー0のこたが、新しい人と接点を作るためのリプ先を選ぶ。
 選ぶ基準: ターゲット（復縁・片思いで悩む20〜30代女性）との一致／新しさ／勢い／こたが自然に価値ある一言を返せるか／返信がプロフィール訪問につながりそうか
 除外: 広告・業者・炎上・誹謗中傷・未成年に見える・性的・暴力・自傷を含む・恋愛と無関係。有望なものがなければ0件でよい
-選んだ投稿ごとに、返信文を最終的に1つだけ決める。手順:
- 1) 方向性の違う返信案を内部で3つ書く（寄り添い／気づき・意見を添える／会話が続く一言）
- 2) 各案を次の観点で厳しくチェックする: 元投稿を正しく理解しているか／こたの自然なタメ口か／共感だけで終わらず必要に応じて気づきや意見があるか／定型文やAIっぽさ（「〜ですよね」の連発、整いすぎ、決まり文句）がないか／相手の状況を勝手に決めつけていないか／宣伝・LINE誘導・リンク・ハッシュタグ・「フォローして」がないか／下の「最近こたが送った返信」と似ていないか
- 3) 問題があれば直し、いちばん良い1つを final にする。60字以内、人がスマホで打ったような自然な文
-最近こたが送った返信（似た言い回しを避ける）:
+選んだ投稿ごとに、返信文を最終的に1つだけ決める。
+返信文のルール（最優先）:
+ - 元投稿の具体的な言葉・状況（出来事、期間、相手の言動、本人の行動など）に必ず1つ触れる。どの投稿にも使い回せる文はNG
+ - 共感の言葉は入れても冒頭の短い一言まで。「しんどいよね」「わかる」「つらいよね」「切ないね」などを重ねない
+ - 定型の励まし・締め（「大丈夫だよ」「頑張って」「応援してる」「無理しないでね」「自分を大事にしてね」「〜な証拠だよ」）で終わらせない
+ - 代わりに、こたならではの一言を添える: 具体的な気づき／男友達から聞いた男性側の見え方（伝聞として）／相手が答えやすい具体的な質問 のどれか1つ
+ - 説教・断定・決めつけはしない。60字以内、人がスマホで打ったような自然なタメ口
+手順:
+ 1) 方向性の違う返信案を内部で3つ書く（具体に触れた気づき／男性側の見え方／具体的な質問）
+ 2) 各案を厳しくチェックする: 元投稿の具体的な内容に触れているか／他の投稿にも使い回せる文になっていないか／共感の繰り返しや定型の励ましがないか／こたの自然なタメ口か／AIっぽさ（整いすぎ、決まり文句）がないか／相手の状況を勝手に決めつけていないか／宣伝・LINE誘導・リンク・ハッシュタグ・「フォローして」がないか／下の「最近こたが送った返信」と言い回しや締め方が似ていないか${insights ? "／下の「実績から分かったこと」に沿っているか" : ""}
+ 3) 問題があれば直し、いちばん良い1つを final にする
+${insights ? insightsText(insights) + "\n" : ""}最近こたが送った返信（似た言い回し・同じ締め方を避ける）:
 ${recent.length ? recent.map((r) => "- " + r).join("\n") : "（まだなし）"}
 ${B.map((p, i) => fmt(p, i, "B")).join("\n")}
 
@@ -150,7 +168,8 @@ async function notify(picks) {
     const Csel = C.slice(0, 15);
     if (Asel.length + Bsel.length + Csel.length === 0) return log("新規の投稿なし。終了");
 
-    const results = runClaude(prompt({ A: Asel, B: Bsel, C: Csel, recent: await replyNotify.recentReplies() }));
+    const insights = await redis.get("renai-karte:meta:replyInsights");
+    const results = runClaude(prompt({ A: Asel, B: Bsel, C: Csel, recent: await replyNotify.recentReplies(), insights }));
     const get = (id) => results.find((r) => r.id === id);
 
     // A → 参考投稿集

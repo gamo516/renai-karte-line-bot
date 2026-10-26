@@ -156,6 +156,12 @@ async function weeklyReport(weightsInfo) {
   const asp = (await redis.lrange("renai-karte:asp-results", 0, 0))[0];
   const research = await redis.lrange("renai-karte:research-log", 0, 6);
   const replies = research.reduce((s, r) => s + (r.replies || 0), 0);
+  // 実際に送ったリプの反応（reply-feedback.js が記録）
+  const sentWeek = Object.values((await redis.hgetall("renai-karte:reply-outcomes")) || {}).filter((o) => new Date(o.sentAt).getTime() >= weekAgo);
+  const avgLikes = sentWeek.length ? (sentWeek.reduce((s, o) => s + (o.likes || 0), 0) / sentWeek.length).toFixed(1) : "-";
+  const opRate = sentWeek.length ? Math.round((sentWeek.filter((o) => o.opReplied).length / sentWeek.length) * 100) : 0;
+  const bestReply = [...sentWeek].sort((a, b) => b.score - a.score)[0];
+  const ins = await redis.get("renai-karte:meta:replyInsights");
   const cost = await xapi.spent();
   const w = weightsInfo.weights;
 
@@ -166,7 +172,10 @@ async function weeklyReport(weightsInfo) {
     `投稿${week.length}本／表示合計${imp}／反応合計${eng}`,
     `フォロワー：${fNow}${typeof fNow === "number" ? "人" : ""}${fWeekAgo ? `（7日前 ${followers[fWeekAgo]}人）` : ""}`,
     top ? `一番見られた投稿：${top.impressions}表示「${top.text.slice(0, 20)}…」` : "",
-    `リプ候補の通知：${replies}件（実際にリプした数は計測できないため、リプ活動とフォロワー増は相関として見ます）`,
+    `リプ：通知${replies}件／実際に送信${sentWeek.length}件（AI案そのまま${sentWeek.filter((o) => o.source === "as_is").length}・手直し${sentWeek.filter((o) => o.source === "edited").length}・自作${sentWeek.filter((o) => o.source === "manual").length}）`,
+    sentWeek.length ? `リプの反応：平均いいね${avgLikes}／相手から返信${opRate}%` : null,
+    bestReply && bestReply.score > 0 ? `一番反応があったリプ：「${bestReply.text.slice(0, 30)}…」` : null,
+    ins ? `リプ文の学習：${ins.summary || "更新済み"}（${ins.basedOn.replies}件から${ins.provisional ? "・暫定" : ""}）` : "リプ文の学習：送信リプが48時間経過で5件たまると開始",
     "",
     "■LINE・サイト",
     `友だち数：${funnel.friends ?? "取得中"}人／新規${funnel.newUsers}人`,
