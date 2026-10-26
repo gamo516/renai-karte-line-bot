@@ -128,6 +128,8 @@ async function notify(picks) {
   if (!DRY && !(await redis.set(K.lock, Date.now(), { nx: true, ex: 1800 }))) return log("別の実行中のためスキップ");
   try {
     const today = new Date().toISOString().slice(0, 10);
+    const actual = await xapi.syncActual();
+    if (actual) log(`X側の実績: 今月${actual.posts}件読み取り（約${actual.month.toFixed(3)}）`);
     const A = await collect("A", today);
     const B = await collect("B", today);
     const C = await collect("C", today);
