@@ -66,5 +66,5 @@ node scripts/auto-inbox.js --dry   # 受付箱の処理を試す
 - 自由入力：診断中なら今の問題を出し直す／命や安全に関わる言葉は公的窓口だけ案内（アフィリエイトなし）／それ以外は6時間に1回だけ「お悩み別ヒント・相談先の選び方」を案内
 - 計測：日別の renai-karte:funnel:YYYY-MM-DD（follow / q1〜q5 / complete / askworry / worry / page / consultinfo / freetext / crisis）、相談ボタンは renai-karte:affclicks（ページ｜mid/end）。週次レポートに表示
 - 計測リンク /r のURLにはLINEユーザーIDを載せない（暗号化）。古いリンクも有効
-- アフィリンクの遷移先：ココナラ 電話占い＞恋愛占い（coconala.com/categories/656?service_kind=1）。初回クーポンの表記は、A8経由での適用を確認するまで載せない（lib/pages.js の CONSULT_SERVICE.fortune.offer）
+- アフィリンク：A8の「商品リンク作成」で生成したものをそのまま使う（A8規約で生成後の書き換えは禁止）。成果対象は categories/3?service_kind=1（電話占い）か categories/2?service_kind=1（悩み相談・恋愛相談）の配下。遷移先を変える時はA8で作り直して set-aff.js で設定。初回クーポンの表記は、A8経由での適用を確認するまで載せない（lib/pages.js の CONSULT_SERVICE.fortune.offer）
 - テスト：npm test
