@@ -10,6 +10,8 @@ const msg = require("./lib/messages");
 const { WORRIES, HITOKOTO } = require("./lib/content");
 const { runDailyFollowups, runMonthlyBroadcast } = require("./lib/followups");
 const admin = require("./lib/admin");
+const { routeText } = require("./lib/textRouter");
+const { resolveTag } = require("./lib/diagnosis");
 
 const config = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -45,10 +47,11 @@ app.use("/brand", express.static(require("path").join(__dirname, "public", "bran
 app.post("/c", async (req, res) => {
   const k = String(req.query.k || "").slice(0, 20);
   const p = String(req.query.p || "").slice(0, 60);
+  const pos = /^(mid|end)$/.test(req.query.pos) ? req.query.pos : "end"; // 記事中盤／終盤のどちらのボタンか
   if (/^(fortune|matching)$/.test(k)) {
     try {
       const key = `renai-karte:affclicks:${store.todayISO()}`;
-      await store.hincr(key, `${k}|${p}`);
+      await store.hincr(key, `${k}|${p}|${pos}`);
     } catch (err) {
       console.error("[c] 記録失敗", (err && err.message) || err);
     }
@@ -69,11 +72,13 @@ app.get("/l", async (req, res) => {
 
 app.get("/r", async (req, res) => {
   const { u, d, s } = req.query;
-  if (!msg.verifyTracked(u, d, s)) return res.redirect(302, "/karte");
+  const userId = msg.resolveTracked(u, d, s);
+  if (!userId) return res.redirect(302, "/karte");
   try {
-    const user = await store.getUser(u);
+    const user = await store.getUser(userId);
     if (user) {
-      await store.upsertUser(u, { clickedAt: user.clickedAt || new Date().toISOString(), clicks: (user.clicks || 0) + 1 });
+      if (!user.clickedAt) await store.funnel("page");
+      await store.upsertUser(userId, { clickedAt: user.clickedAt || new Date().toISOString(), clicks: (user.clicks || 0) + 1 });
     }
   } catch (err) {
     console.error("[r] 記録失敗", (err && err.message) || err);
@@ -133,12 +138,14 @@ async function handleFollow(event) {
     blocked: false,
   });
 
+  await store.funnel("follow");
+
   const intro = {
     type: "text",
     text:
-      "追加ありがとう、こただよ。\n\n" +
-      "5つの質問・30秒で、あなたの恋のクセがわかる診断つくったの。最後まで答えてくれたら、タイプ別の「恋のクセ解説」も渡すね。\n\n" +
-      "考えすぎず、直感でいいよ。さっそく1問目！",
+      "追加ありがとう、こただよ🌙\n\n" +
+      "5つの質問に答えるだけで、恋愛でのあなたの「反応のクセ」がわかる診断をつくったよ。30秒くらいで終わるから、直感で選んでね。\n\n" +
+      "結果のあとに、今の悩みに合わせたヒントも返すね。さっそく1問目！",
   };
   return reply(event, [intro, msg.questionMessage(0)]);
 }
@@ -165,15 +172,20 @@ async function handlePostback(event) {
       const key = data.get("w");
       if (!WORRIES[key]) return null;
       await store.upsertUser(userId, { worry: key });
+      await store.funnel("worry");
       return reply(event, [msg.worryAnswer(userId, key)]);
     }
     case "askworry":
-      return reply(event, [msg.worryQuestion("今いちばん気になってるのはどれ？")]);
+      await store.funnel("askworry");
+      return reply(event, [msg.worryQuestion()]);
+    case "consultinfo":
+      await store.funnel("consultinfo");
+      return reply(event, [msg.consultInfo(userId)]);
     case "mytype":
       if (!user.finalTag) {
         return reply(event, [{ type: "text", text: "まだ診断の途中みたい。続きからいこ！" }, msg.questionMessage(Math.min(user.questionIndex || 0, questions.length - 1))]);
       }
-      return reply(event, [msg.resultCard(userId, user.finalTag)]);
+      return reply(event, [msg.typeCard(userId, user.finalTag)]);
     case "hitokoto": {
       const text = HITOKOTO[Math.floor(Math.random() * HITOKOTO.length)];
       return reply(event, [{ type: "text", text: `今日のこたから、ひとこと\n\n${text}` }]);
@@ -191,6 +203,8 @@ async function handleAnswer(event, user, data) {
   if (user.finalTag || (q !== null && Number(q) !== current)) return null;
 
   const tag = data.get("tag");
+  if (!["A", "B", "C", "D"].includes(tag)) return null; // 不正な値では診断を進めない
+  await store.funnel(`q${current + 1}`);
   const tagCounts = Object.assign({ A: 0, B: 0, C: 0, D: 0 }, user.tagCounts);
   tagCounts[tag] = (tagCounts[tag] || 0) + 1;
   const answers = [...(user.answers || []), tag];
@@ -211,22 +225,10 @@ async function handleAnswer(event, user, data) {
     diagnosisCompletedAt: store.todayISO(),
   });
 
-  return reply(event, [
-    { type: "text", text: "おつかれさま！あなたのタイプ、出たよ。" },
-    msg.resultCard(userId, finalTag),
-    msg.worryQuestion(),
-  ]);
-}
+  await store.funnel("complete");
 
-// いちばん多いタイプ。同点なら、後の設問ほど本音に近いとみなして、最後に選んだほうを優先する
-function resolveTag(tagCounts, answers) {
-  const max = Math.max(...Object.values(tagCounts));
-  const tied = Object.keys(tagCounts).filter((t) => tagCounts[t] === max);
-  if (tied.length === 1) return tied[0];
-  for (let i = answers.length - 1; i >= 0; i--) {
-    if (tied.includes(answers[i])) return answers[i];
-  }
-  return tied[0];
+  // 結果カードの次の行動は「今の悩みに合ったヒントを見る」1つだけ（タイプ解説はリッチメニューから）
+  return reply(event, [{ type: "text", text: "おつかれさま！あなたのタイプ、出たよ。" }, msg.resultCard(userId, finalTag)]);
 }
 
 // ---------- 管理者機能（受付箱に入れるだけ。処理は会社PCでまとめて行う） ----------
@@ -247,18 +249,18 @@ async function handleMessage(event) {
   return null;
 }
 
-// ---------- キーワード応答（通数0） ----------
+// ---------- 文字の受信（すべてreplyなので通数0）。返し方は lib/textRouter.js ----------
 async function handleText(event) {
-  const text = (event.message.text || "").trim();
   const userId = event.source.userId;
-  if (/相性/.test(text)) {
-    return reply(event, [msg.linkCard("タイプ別相性表", "タイプ別相性表", "4つのタイプ同士の相性、まとめてみたよ。", "相性表を見る", msg.trackedUrl(userId, "/aisho"))]);
-  }
-  if (/^(カルテ|診断|再診断)$/.test(text)) {
+  const user = (await store.getUser(userId)) || (await store.upsertUser(userId, {}));
+  const r = routeText(event.message.text, user, { isAdmin: await admin.isAdmin(userId) });
+  if (r.event) await store.funnel(r.event);
+  if (r.messages === "restart") {
     await store.upsertUser(userId, freshDiagnosis());
     return reply(event, [msg.questionMessage(0)]);
   }
-  return null; // それ以外は個別の相談として、手動対応用に残す
+  if (r.patch) await store.upsertUser(userId, r.patch);
+  return r.messages ? reply(event, r.messages) : null;
 }
 
 // 未反応者への追いLINE：毎日21時（JST）

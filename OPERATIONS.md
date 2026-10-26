@@ -58,3 +58,13 @@ node scripts/metrics.js            # 実績取得（月曜なら週次レポー�
 node scripts/metrics.js --report   # 週次レポートを今すぐ送る
 node scripts/auto-inbox.js --dry   # 受付箱の処理を試す
 ```
+
+## LINE導線（2026-10-26 改修）
+友だち追加 → あいさつ＋Q1 → 5問（ボタンに短い意味つき）→ 結果カード（ボタンは「今の悩みに合ったヒントを見る」1つ）→ 悩み4択 → 悩み別ヒント（悩みごとのWebボタン＋「相談先の選び方を見る」）→ Web解説ページ（記事中盤のひとこと＋終盤の相談ブロック）→ ココナラ電話占い
+- ここまで全部 reply（通数0）。プッシュは追いLINE（最大2通）と月1配信だけ
+- タイプ解説はリッチメニュー「私のタイプ解説」から
+- 自由入力：診断中なら今の問題を出し直す／命や安全に関わる言葉は公的窓口だけ案内（アフィリエイトなし）／それ以外は6時間に1回だけ「お悩み別ヒント・相談先の選び方」を案内
+- 計測：日別の renai-karte:funnel:YYYY-MM-DD（follow / q1〜q5 / complete / askworry / worry / page / consultinfo / freetext / crisis）、相談ボタンは renai-karte:affclicks（ページ｜mid/end）。週次レポートに表示
+- 計測リンク /r のURLにはLINEユーザーIDを載せない（暗号化）。古いリンクも有効
+- アフィリンクの遷移先：ココナラ 電話占い＞恋愛占い（coconala.com/categories/656?service_kind=1）。初回クーポンの表記は、A8経由での適用を確認するまで載せない（lib/pages.js の CONSULT_SERVICE.fortune.offer）
+- テスト：npm test

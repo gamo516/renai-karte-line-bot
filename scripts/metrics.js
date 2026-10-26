@@ -138,7 +138,13 @@ async function lineFunnel(days) {
     reachedPage: recent.filter((u) => u.clickedAt).length,
     affClicks: await sumHash("renai-karte:affclicks"),
     lineClicksFromX: await sumHash("renai-karte:lineclicks"),
+    steps: (await sumHash("renai-karte:funnel")).by, // follow / q1〜q5 / complete / worry / page など（2026-10-26〜）
   };
+}
+
+// 相談ボタンのクリックを記事中盤/終盤で分けて数える（キーは "fortune|ページ|mid|end"。旧形式は終盤扱い）
+function sumPos(by, pos) {
+  return Object.entries(by).reduce((s, [k, v]) => s + ((k.split("|")[2] || "end") === pos ? Number(v) : 0), 0);
 }
 
 async function weeklyReport(weightsInfo) {
@@ -181,7 +187,9 @@ async function weeklyReport(weightsInfo) {
     `友だち数：${funnel.friends ?? "取得中"}人／新規${funnel.newUsers}人`,
     `診断完了：${funnel.diagnosed}人／解説ページ到達：${funnel.reachedPage}人`,
     `X投稿のLINEリンククリック：${funnel.lineClicksFromX.total}回`,
-    `相談ボタン（ココナラ）クリック：${funnel.affClicks.total}回`,
+    `相談ボタン（ココナラ）クリック：${funnel.affClicks.total}回（記事中盤${sumPos(funnel.affClicks.by, "mid")}・終盤${sumPos(funnel.affClicks.by, "end")}）`,
+    `ファネル：追加${funnel.steps.follow || 0}→Q1 ${funnel.steps.q1 || 0}→Q5 ${funnel.steps.q5 || 0}→悩み選択${funnel.steps.worry || 0}→ページ${funnel.steps.page || 0}→相談クリック${funnel.affClicks.total}`,
+    funnel.steps.crisis ? `※命や安全に関わるメッセージ：${funnel.steps.crisis}件（自動で公的窓口を案内済み）` : null,
     `ASP成果（最終入力）：${asp ? `発生${asp.pending}・確定${asp.confirmed}（${asp.date}入力）` : "未入力（LINEで「成果 発生数 確定数」）"}`,
     "",
     "■投稿の配分（次週）",
