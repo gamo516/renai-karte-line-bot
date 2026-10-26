@@ -11,6 +11,9 @@ const { execFileSync } = require("child_process");
 const line = require("@line/bot-sdk");
 const { Redis } = require("@upstash/redis");
 const xapi = require("../lib/xapi");
+const replyNotify = require("../lib/replyNotify");
+// --only=B などで一部のグループだけ実行（テスト用。費用を抑えるため）
+const ONLY = (process.argv.find((a) => a.startsWith("--only=")) || "").slice(7).split(",").filter(Boolean);
 
 const DRY = process.argv.includes("--dry");
 const redis = Redis.fromEnv();
@@ -71,7 +74,7 @@ async function collect(group, today) {
   return list.filter((_, i) => !seen[i]);
 }
 
-function prompt({ A, B, C }) {
+function prompt({ A, B, C, recent = [] }) {
   const fmt = (p, i, tag) =>
     `${tag}${i + 1}. [投稿${hoursSince(p.createdAt).toFixed(1)}時間前 / いいね${p.likes} 返信${p.replies} 引用${p.quotes} 保存${p.bookmarks ?? "?"} 表示${p.views ?? "?"}${p.followers != null ? ` / 投稿者フォロワー${p.followers}` : ""} / 勢い${velocity(p).toFixed(1)}/h] ${p.text.replace(/\n/g, " / ")}`;
   return `あなたは恋愛系Xアカウント「こた」（@kota_0517）の運用チームです。今日集めたXの投稿を3つの作業で処理してください。
@@ -92,7 +95,12 @@ ${A.map((p, i) => fmt(p, i, "A")).join("\n")}
 フォロワー0のこたが、新しい人と接点を作るためのリプ先を選ぶ。
 選ぶ基準: ターゲット（復縁・片思いで悩む20〜30代女性）との一致／新しさ／勢い／こたが自然に価値ある一言を返せるか／返信がプロフィール訪問につながりそうか
 除外: 広告・業者・炎上・誹謗中傷・未成年に見える・性的・暴力・自傷を含む・恋愛と無関係。有望なものがなければ0件でよい
-返信案は2パターン（①共感して寄り添う ②会話が続く一言や問いかけ）。各60字以内。宣伝・リンク・ハッシュタグ・「フォローして」禁止
+選んだ投稿ごとに、返信文を最終的に1つだけ決める。手順:
+ 1) 方向性の違う返信案を内部で3つ書く（寄り添い／気づき・意見を添える／会話が続く一言）
+ 2) 各案を次の観点で厳しくチェックする: 元投稿を正しく理解しているか／こたの自然なタメ口か／共感だけで終わらず必要に応じて気づきや意見があるか／定型文やAIっぽさ（「〜ですよね」の連発、整いすぎ、決まり文句）がないか／相手の状況を勝手に決めつけていないか／宣伝・LINE誘導・リンク・ハッシュタグ・「フォローして」がないか／下の「最近こたが送った返信」と似ていないか
+ 3) 問題があれば直し、いちばん良い1つを final にする。60字以内、人がスマホで打ったような自然な文
+最近こたが送った返信（似た言い回しを避ける）:
+${recent.length ? recent.map((r) => "- " + r).join("\n") : "（まだなし）"}
 ${B.map((p, i) => fmt(p, i, "B")).join("\n")}
 
 ## 作業C：リアルな悩みの分類（${C.length}件）
@@ -102,7 +110,7 @@ ${C.map((p, i) => `C${i + 1}. ${p.text.replace(/\n/g, " / ")}`).join("\n")}
 
 ## 出力（JSON配列のみ。前置き不要）
 作業A: {"id":"A番号","usable":true/false,"type":"型","category":"empathy|practical|conversation","hook":"冒頭フックの手法(20字)","structure":"文章構成(30字)","emotion":"刺さる感情(20字)","why":"読者が反応する理由(60字)"}
-作業B（選んだものだけ）: {"id":"B番号","priority":1〜5,"summary":"投稿の要旨(30字)","reason":"選定理由(40字)","drafts":["案1","案2"]}
+作業B（選んだものだけ）: {"id":"B番号","priority":1〜5,"reason":"選定理由(40字)","drafts":["内部案1","内部案2","内部案3"],"check":"チェックで直した点・選んだ理由(60字)","final":"最終的な返信文1つ"}
 作業C: {"id":"C番号","usable":true/false,"category":"悩みの分類(例: 連絡していいか迷う/別れの理由が分からない/既読無視/行動できない/相手の未練を知りたい/その他)","worry":"抽象化した悩み(40字)","postIdea":"こたの投稿テーマ案(40字)"}`;
 }
 
@@ -112,14 +120,7 @@ function runClaude(text) {
 }
 
 async function notify(picks) {
-  if (picks.length === 0) return;
-  const head = { type: "text", text: `今日のリプ候補 ${picks.length}件だよ\n上から優先度順。リンクを開いて、合う方の案をコピーしてリプしてね（自分の言葉に直してもOK）` };
-  const bubbles = picks.slice(0, 4).map(({ p, a }) => ({
-    type: "text",
-    text: `【優先${a.priority}】${a.summary}\n${p.url}\n投稿${hoursSince(p.createdAt).toFixed(0)}時間前・いいね${p.likes}・返信${p.replies}\n選んだ理由：${a.reason}\n\n①${a.drafts[0]}\n\n②${a.drafts[1] || ""}`,
-  }));
-  const client = new line.messagingApi.MessagingApiClient({ channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN });
-  for (const to of await redis.smembers(K.admins)) await client.pushMessage({ to, messages: [head, ...bubbles] }); // 1プッシュ=5吹き出し=1通
+  await replyNotify.send(picks.map(({ p, a }) => ({ postId: p.id, url: p.url, original: p.text, reply: a.final })));
 }
 
 (async () => {
@@ -130,9 +131,10 @@ async function notify(picks) {
     const today = new Date().toISOString().slice(0, 10);
     const actual = await xapi.syncActual();
     if (actual) log(`X側の実績: 今月${actual.posts}件読み取り（約${actual.month.toFixed(3)}）`);
-    const A = await collect("A", today);
-    const B = await collect("B", today);
-    const C = await collect("C", today);
+    const run = (g) => ONLY.length === 0 || ONLY.includes(g);
+    const A = run("A") ? await collect("A", today) : [];
+    const B = run("B") ? await collect("B", today) : [];
+    const C = run("C") ? await collect("C", today) : [];
     log(`取得 A${A.length} B${B.length} C${C.length}（新規のみ）`);
 
     // A群: いいね上位＋勢い上位のうち、投稿者のフォロワー数を少数だけ調べて「小規模なのに伸びた」を判定
@@ -148,7 +150,7 @@ async function notify(picks) {
     const Csel = C.slice(0, 15);
     if (Asel.length + Bsel.length + Csel.length === 0) return log("新規の投稿なし。終了");
 
-    const results = runClaude(prompt({ A: Asel, B: Bsel, C: Csel }));
+    const results = runClaude(prompt({ A: Asel, B: Bsel, C: Csel, recent: await replyNotify.recentReplies() }));
     const get = (id) => results.find((r) => r.id === id);
 
     // A → 参考投稿集
@@ -177,13 +179,20 @@ async function notify(picks) {
 
     // B → リプ候補（優先度順に最大5件。1通にまとめて送る）
     const picks = results
-      .filter((r) => /^B\d+$/.test(r.id) && Array.isArray(r.drafts))
+      .filter((r) => /^B\d+$/.test(r.id) && typeof r.final === "string" && r.final.trim())
       .map((a) => ({ a, p: Bsel[Number(a.id.slice(1)) - 1] }))
       .filter((x) => x.p)
       .sort((x, y) => x.a.priority - y.a.priority)
       .slice(0, 5);
-    if (DRY) picks.forEach(({ p, a }) => log("[dry]B", a.priority, p.url, a.summary, "|", a.drafts.join(" / ")));
-    else await notify(picks);
+    if (DRY) {
+      picks.forEach(({ p, a }) => log("[dry]B", a.priority, p.url, "|", p.text.slice(0, 40).replace(/\n/g, " "), "→", a.final, "| 内部案:", (a.drafts || []).join(" / "), "| チェック:", a.check));
+      if (picks.length) await replyNotify.validate(picks.map(({ p, a }) => ({ postId: p.id, url: p.url, original: p.text, reply: a.final })));
+    } else {
+      await notify(picks);
+      for (const { p, a } of picks) {
+        await replyNotify.logDecision({ date: today, postId: p.id, url: p.url, original: p.text.slice(0, 200), reply: a.final, drafts: a.drafts, check: a.check, reason: a.reason, priority: a.priority, likes: p.likes, ageHours: Number(hoursSince(p.createdAt).toFixed(1)) });
+      }
+    }
 
     // 処理済みIDを記録（同じ投稿を翌日以降また分析・推薦しない。30日で消える）
     if (!DRY) {

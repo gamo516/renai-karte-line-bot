@@ -10,6 +10,7 @@ const path = require("path");
 const { execFileSync } = require("child_process");
 const line = require("@line/bot-sdk");
 const { Redis } = require("@upstash/redis");
+const replyNotify = require("../lib/replyNotify");
 
 const DRY = process.argv.includes("--dry");
 const redis = Redis.fromEnv();
@@ -86,12 +87,11 @@ function buildPrompt(materials) {
 
 ## 処理のしかた（mode ごと）
 ### mode=reply（返信案がほしい）
-対象の投稿（他アカウントの人気投稿、またはこたの投稿に来たリプ）に、こたとして返すリプ案を3つ作る。
-- 1つ目: 共感して寄り添う
-- 2つ目: 投稿者や読者がもう一言返したくなる問いかけで終える
-- 3つ目: 短く気の利いたひとこと（「男友達に聞いたら〜」のような男の本音の補足でもよい）
-- 各60字以内。宣伝・リンク・ハッシュタグ・「フォローして」は禁止。絵文字は1つまで
-- 出力: {"index":番号,"mode":"reply","target":"対象投稿の要約（30字以内）","drafts":["案1","案2","案3"]}
+対象の投稿（他アカウントの人気投稿、またはこたの投稿に来たリプ）に、こたとして返す返信文を最終的に1つだけ決める。
+- 内部で方向性の違う案を3つ書き（寄り添い／気づき・意見を添える／会話が続く一言）、次の観点でチェックして直し、いちばん良い1つを final にする:
+  元投稿を正しく理解しているか／こたの自然なタメ口か／共感だけで終わらず必要に応じて気づきや意見があるか／定型文やAIっぽさがないか／相手の状況を決めつけていないか／宣伝・リンク・ハッシュタグ・「フォローして」がないか
+- 60字以内。絵文字は1つまで。人がスマホで打ったような自然な文
+- 出力: {"index":番号,"mode":"reply","target":"対象投稿の要約（30字以内）","drafts":["内部案1","内部案2","内部案3"],"check":"直した点・選んだ理由(60字)","final":"最終的な返信文1つ"}
 
 ### mode=ref（参考に保存）
 - 投稿の場合: 本文を文字起こし（画像の場合は投稿本体のみ。リプ欄は除く）し、型と伸びた理由を分析する
@@ -126,15 +126,13 @@ function runClaude(prompt, imgDir) {
 
 async function sendReplies(replies) {
   if (replies.length === 0) return;
-  const admins = await redis.smembers(ADMINS_KEY);
-  const client = new line.messagingApi.MessagingApiClient({ channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN });
-  const bubbles = replies.map((r, i) => ({
-    type: "text",
-    text: `${i === 0 ? "リプ案できたよ（長押しでコピー）\n\n" : ""}【${r.target}】${r.url ? `\n${r.url}` : ""}\n\n${r.note ? r.note : r.drafts.map((d, k) => `${k + 1}) ${d}`).join("\n\n")}`,
-  }));
-  // プッシュ1回=吹き出し5つまで=LINE1通カウントなので、5件ずつまとめて送る
-  for (let i = 0; i < bubbles.length; i += 5) {
-    for (const to of admins) await client.pushMessage({ to, messages: bubbles.slice(i, i + 5) });
+  const cards = replies.filter((r) => r.postId && r.final);
+  const others = replies.filter((r) => !(r.postId && r.final));
+  if (cards.length) await replyNotify.send(cards.map((r) => ({ postId: r.postId, url: r.url, original: r.original || r.target, reply: r.final })), "受付箱のリプ");
+  if (others.length) {
+    const client = new line.messagingApi.MessagingApiClient({ channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN });
+    const text = others.map((r) => `【${r.target}】${r.url ? "\n" + r.url : ""}\n\n${r.note || r.final}`).join("\n\n―――\n\n");
+    for (const to of await redis.smembers(ADMINS_KEY)) await client.pushMessage({ to, messages: [{ type: "text", text: "返信文できたよ（長押しでコピー）\n\n" + text }] });
   }
 }
 
@@ -154,8 +152,11 @@ async function sendReplies(replies) {
     let accountCount = 0;
     for (const r of results) {
       const m = materials.find((x) => x.index === r.index);
-      if (r.mode === "reply" && Array.isArray(r.drafts)) {
-        replies.push({ ...r, url: m && m.fetched && m.fetched[0] && m.fetched[0].url });
+      if (r.mode === "reply" && r.final) {
+        const post = m && m.fetched && m.fetched.find((f) => f.kind === "post");
+        const postId = post && (post.url.match(/status\/(\d+)/) || [])[1];
+        replies.push({ ...r, url: post && post.url, postId, original: post && post.text });
+        if (!DRY) await replyNotify.logDecision({ date: new Date().toISOString().slice(0, 10), source: "inbox", postId, url: post && post.url, original: post && post.text && post.text.slice(0, 200), reply: r.final, drafts: r.drafts, check: r.check });
       } else if (r.mode === "ref" && r.kind === "post") {
         if (!DRY) await redis.lpush(REFS_KEY, { text: r.text, likes: r.likes, views: r.views, account: r.account, type: r.type, hook: r.hook, why: r.why, savedAt: new Date().toISOString() });
         refCount++;
@@ -165,7 +166,7 @@ async function sendReplies(replies) {
       } else {
         log(`スキップ #${r.index}: ${r.reason || JSON.stringify(r).slice(0, 80)}`);
         // 返信案を頼まれていたものは、できなかった理由をLINEで伝える
-        if (m && m.mode === "reply") replies.push({ target: "読み取れなかった投稿", url: m.fetched && m.fetched[0] && m.fetched[0].url, drafts: [], note: r.reason || "内容を読み取れなかったよ。スクショで送ってみて" });
+        if (m && m.mode === "reply") replies.push({ target: "読み取れなかった投稿", url: m.fetched && m.fetched[0] && m.fetched[0].url, note: r.reason || "内容を読み取れなかったよ。スクショで送ってみて" });
       }
       if (DRY) log("[dry]", JSON.stringify(r).slice(0, 300));
     }
