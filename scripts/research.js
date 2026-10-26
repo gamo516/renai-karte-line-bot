@@ -1,29 +1,47 @@
-// リサーチ部隊：X公式API（従量課金）で伸びている復縁・片思いの投稿を集め、
-//   1) 型と伸びた理由を分析して参考投稿集に保存（毎朝のこたの投稿生成で見本に使う）
-//   2) 投稿から間もないものを「リプ候補」として、こた口調のリプ案付きでLINEに送る
-// 1日の読み込みは最大 QUERIES×MAX_PER_QUERY 件（約0.75円/件）。同じ日の再取得は課金されない。
-// 使い方: node scripts/research.js [--dry]   … --dry は保存・送信しない
+// 競合リサーチAI（1日1回）。X公式APIで投稿を集め、Claude（claude -p）で分析・選定する。
+//   A バズ分析（30件）   … 伸びた投稿の型・フック・感情訴求を分析し参考投稿集へ。小規模アカウントの伸びも拾う
+//   B リプ候補（35件）   … 投稿から12時間以内の投稿から、こたが自然に返せる3〜5件を選び、返信案2つ付きでLINEへ
+//   C リアルな悩み（15件）… 一般ユーザーの悩みを分類だけして保存（本文・ユーザー情報は保存しない）→投稿テーマへ
+// 安全装置: 予算ガード（lib/xapi.js）／二重起動ロック／再試行なし／取得済みIDの重複除外
+// 使い方: node scripts/research.js [--dry]   … --dry はX APIは呼ぶが、保存・LINE送信・既読登録をしない
 require("dotenv").config({ path: require("path").join(__dirname, "..", ".env"), quiet: true });
 const fs = require("fs");
 const path = require("path");
 const { execFileSync } = require("child_process");
 const line = require("@line/bot-sdk");
 const { Redis } = require("@upstash/redis");
+const xapi = require("../lib/xapi");
 
 const DRY = process.argv.includes("--dry");
 const redis = Redis.fromEnv();
-const REFS_KEY = "renai-karte:refs";
-const SEEN_KEY = "renai-karte:research-seen";
-const ADMINS_KEY = "renai-karte:admins";
+const K = {
+  refs: "renai-karte:refs",
+  worries: "renai-karte:worries",
+  seen: (d) => `renai-karte:research-seen:${d}`,
+  lock: "renai-karte:research-lock",
+  admins: "renai-karte:admins",
+  log: "renai-karte:research-log",
+};
 const CLAUDE_BIN = process.env.CLAUDE_BIN || path.join(process.env.USERPROFILE || "", ".local", "bin", "claude.exe");
 const LOG_FILE = path.join(__dirname, "..", "logs", "research.log");
+const BASE = "lang:ja -is:retweet -is:reply";
 
-// 検索キーワード（いいね100以上・日本語・RTと返信は除く）
-const QUERIES = ["復縁", "片思い", "元彼", "元カレ", "脈あり"].map((k) => `${k} lang:ja min_likes:100 -is:retweet -is:reply`);
-const MAX_PER_QUERY = 20;
-const MAX_NEW_REFS = 10; // 1日に参考投稿集へ追加する上限
-const REPLY_CANDIDATES = 5; // 1日に送るリプ候補の数
-const FRESH_HOURS = 12; // リプ候補にする「投稿から間もない」の基準
+// グループごとの検索（max_results の合計 = 1日の上限 80件）
+const GROUPS = {
+  A: [
+    { q: `(復縁 OR 未練 OR 元彼 OR 元カレ) min_likes:50 ${BASE}`, n: 10 },
+    { q: `(片思い OR 脈あり OR 男性心理) min_likes:50 ${BASE}`, n: 10 },
+    { q: `(失恋 OR 既読無視 OR 冷却期間) min_likes:30 ${BASE}`, n: 10 },
+  ],
+  B: [
+    { q: `(復縁 OR 元彼 OR 元カレ OR 未練) min_likes:5 -has:links ${BASE}`, n: 15, fresh: true },
+    { q: `(片思い OR 脈あり OR 好きな人) min_likes:5 -has:links ${BASE}`, n: 10, fresh: true },
+    { q: `(失恋 OR 既読無視 OR 連絡こない) min_likes:5 -has:links ${BASE}`, n: 10, fresh: true },
+  ],
+  C: [{ q: `(元彼 OR 復縁 OR 片思い OR 既読無視) (どうしたら OR わからない OR 辛い OR 連絡していい OR 諦め) -has:links ${BASE}`, n: 15 }],
+};
+const FRESH_HOURS = 12;
+const AUTHOR_LOOKUPS = 10; // A群でフォロワー数を調べる上限（1件$0.01）
 
 function log(...args) {
   const msg = `[${new Date().toISOString()}] ${args.join(" ")}`;
@@ -32,119 +50,156 @@ function log(...args) {
   fs.appendFileSync(LOG_FILE, msg + "\n");
 }
 
-async function search(query) {
-  const params = new URLSearchParams({
-    query,
-    max_results: String(MAX_PER_QUERY),
-    sort_order: "relevancy",
-    "tweet.fields": "public_metrics,created_at",
-  });
-  const res = await fetch(`https://api.x.com/2/tweets/search/recent?${params}`, {
-    headers: { Authorization: `Bearer ${process.env.X_BEARER_TOKEN}` },
-    signal: AbortSignal.timeout(30000),
-  });
-  if (!res.ok) throw new Error(`X API ${res.status}: ${(await res.text()).slice(0, 200)}`);
-  const j = await res.json();
-  return (j.data || []).map((t) => ({
-    id: t.id,
-    url: `https://x.com/i/status/${t.id}`,
-    text: t.text,
-    createdAt: t.created_at,
-    likes: t.public_metrics.like_count,
-    replies: t.public_metrics.reply_count,
-    retweets: t.public_metrics.retweet_count,
-    views: t.public_metrics.impression_count,
-  }));
+const hoursSince = (iso) => (Date.now() - new Date(iso).getTime()) / 3600000;
+// 反応の勢い: 1時間あたりの反応数（いいね + 返信×3 + 引用×3 + 保存×2）
+const velocity = (p) => (p.likes + p.replies * 3 + p.quotes * 3 + (p.bookmarks || 0) * 2) / Math.max(1, hoursSince(p.createdAt));
+
+async function collect(group, today) {
+  const out = new Map();
+  for (const s of GROUPS[group]) {
+    const startTime = s.fresh ? new Date(Date.now() - FRESH_HOURS * 3600000).toISOString().replace(/\.\d+Z$/, "Z") : undefined;
+    try {
+      for (const p of await xapi.searchRecent(s.q, { maxResults: s.n, startTime })) out.set(p.id, p);
+    } catch (e) {
+      log(`検索失敗[${group}]`, e.message);
+      if (e instanceof xapi.BudgetExceeded) throw e; // 予算超過見込みなら全体を止める
+    }
+  }
+  // 過去に処理済みの投稿は除外（Aは同じ投稿を何度も参考にしない）
+  const list = [...out.values()];
+  const seen = await Promise.all(list.map((p) => redis.sismember(K.seen(group), p.id)));
+  return list.filter((_, i) => !seen[i]);
 }
 
-function runClaude(prompt) {
-  const out = execFileSync(CLAUDE_BIN, ["-p", "--output-format", "text"], { input: prompt, encoding: "utf8", timeout: 10 * 60 * 1000, maxBuffer: 20 * 1024 * 1024 });
+function prompt({ A, B, C }) {
+  const fmt = (p, i, tag) =>
+    `${tag}${i + 1}. [投稿${hoursSince(p.createdAt).toFixed(1)}時間前 / いいね${p.likes} 返信${p.replies} 引用${p.quotes} 保存${p.bookmarks ?? "?"} 表示${p.views ?? "?"}${p.followers != null ? ` / 投稿者フォロワー${p.followers}` : ""} / 勢い${velocity(p).toFixed(1)}/h] ${p.text.replace(/\n/g, " / ")}`;
+  return `あなたは恋愛系Xアカウント「こた」（@kota_0517）の運用チームです。今日集めたXの投稿を3つの作業で処理してください。
+
+## こた
+- 復縁・片思いの相談をたくさん聞いてきたアラサー女性。男友達から聞いた「男の本音」にも詳しい
+- 口調はやわらかいタメ口。説教しない、相手を否定しない、異性を攻撃しない、相手の心理を根拠なく断定しない
+- こた自身の恋愛体験や相談実績を作らない。占い師・霊能者のふりはしない
+
+## 作業A：バズ投稿の分析（${A.length}件）
+伸びた理由を分析する。いいね数だけでなく、投稿者のフォロワーが少ないのに伸びている投稿（フォロワーに対していいねが多い）を重視する。
+宣伝・業者（占いアプリ・note・LINEへの誘導が主目的）や炎上ネタは usable:false。
+type: uketori / cliffhanger / checklist / kiita / kyokan / spiritual / nitaku / other
+category: empathy（共感型）/ practical（実用型）/ conversation（会話型）
+${A.map((p, i) => fmt(p, i, "A")).join("\n")}
+
+## 作業B：リプ候補の選定（候補${B.length}件から最大5件）
+フォロワー0のこたが、新しい人と接点を作るためのリプ先を選ぶ。
+選ぶ基準: ターゲット（復縁・片思いで悩む20〜30代女性）との一致／新しさ／勢い／こたが自然に価値ある一言を返せるか／返信がプロフィール訪問につながりそうか
+除外: 広告・業者・炎上・誹謗中傷・未成年に見える・性的・暴力・自傷を含む・恋愛と無関係。有望なものがなければ0件でよい
+返信案は2パターン（①共感して寄り添う ②会話が続く一言や問いかけ）。各60字以内。宣伝・リンク・ハッシュタグ・「フォローして」禁止
+${B.map((p, i) => fmt(p, i, "B")).join("\n")}
+
+## 作業C：リアルな悩みの分類（${C.length}件）
+一般ユーザーの恋愛の悩みを、個人が特定できない形に抽象化して分類する。固有名詞・具体的な個人情報・センシティブな詳細は書かない。
+恋愛の悩みでないもの、宣伝は除外。
+${C.map((p, i) => `C${i + 1}. ${p.text.replace(/\n/g, " / ")}`).join("\n")}
+
+## 出力（JSON配列のみ。前置き不要）
+作業A: {"id":"A番号","usable":true/false,"type":"型","category":"empathy|practical|conversation","hook":"冒頭フックの手法(20字)","structure":"文章構成(30字)","emotion":"刺さる感情(20字)","why":"読者が反応する理由(60字)"}
+作業B（選んだものだけ）: {"id":"B番号","priority":1〜5,"summary":"投稿の要旨(30字)","reason":"選定理由(40字)","drafts":["案1","案2"]}
+作業C: {"id":"C番号","usable":true/false,"category":"悩みの分類(例: 連絡していいか迷う/別れの理由が分からない/既読無視/行動できない/相手の未練を知りたい/その他)","worry":"抽象化した悩み(40字)","postIdea":"こたの投稿テーマ案(40字)"}`;
+}
+
+function runClaude(text) {
+  const out = execFileSync(CLAUDE_BIN, ["-p", "--output-format", "text"], { input: text, encoding: "utf8", timeout: 12 * 60 * 1000, maxBuffer: 20 * 1024 * 1024 });
   return JSON.parse(out.slice(out.indexOf("["), out.lastIndexOf("]") + 1));
 }
 
-function buildPrompt(refs, candidates) {
-  return `あなたは恋愛アカウント運用のアシスタントです。Xアカウント「こた」（復縁・片思い向け）の運用のため、Xで伸びている投稿を処理してください。
-
-## こたのキャラ
-- 復縁・片思いの相談をたくさん聞いてきたアラサー女性。男友達から聞いた「男の本音」にも詳しい
-- 口調はやわらかいタメ口。説教しない、相手を否定しない、異性を攻撃しない。こた自身の恋愛体験は作らない
-
-## 作業1：参考投稿の分析（${refs.length}件）
-各投稿の型と伸びた理由を分析する。
-type は uketori(受け取り型の短い言い切り) / cliffhanger(途中で切って続きへ) / checklist(リスト) / kiita(聞いた話・体験談) / kyokan(本音の吐き出し) / spiritual(運命・タイミング) / nitaku(二択・問いかけ) / other
-宣伝・業者っぽい投稿（占いアプリやnoteへの露骨な誘導だけのもの）は usable:false にする。
-${refs.map((r, i) => `R${i + 1}. [いいね${r.likes}/表示${r.views}] ${r.text.replace(/\n/g, " / ")}`).join("\n")}
-
-## 作業2：リプ案（${candidates.length}件）
-各投稿に、こたとして返すリプ案を3つ（共感／会話が続く問いかけ／短い気の利いたひとこと）。各60字以内。宣伝・リンク・ハッシュタグ禁止。業者・宣伝投稿にはリプしないので skip:true。
-${candidates.map((c, i) => `C${i + 1}. [いいね${c.likes}] ${c.text.replace(/\n/g, " / ")}`).join("\n")}
-
-## 出力
-JSON配列のみ。前置き不要。
-作業1は {"id":"R番号","usable":true/false,"type":"型","hook":"1行目のつかみ(20字程度)","why":"伸びた理由(60字程度)"}
-作業2は {"id":"C番号","skip":true/false,"target":"投稿の要約(30字以内)","drafts":["案1","案2","案3"]}`;
+async function notify(picks) {
+  if (picks.length === 0) return;
+  const head = { type: "text", text: `今日のリプ候補 ${picks.length}件だよ\n上から優先度順。リンクを開いて、合う方の案をコピーしてリプしてね（自分の言葉に直してもOK）` };
+  const bubbles = picks.slice(0, 4).map(({ p, a }) => ({
+    type: "text",
+    text: `【優先${a.priority}】${a.summary}\n${p.url}\n投稿${hoursSince(p.createdAt).toFixed(0)}時間前・いいね${p.likes}・返信${p.replies}\n選んだ理由：${a.reason}\n\n①${a.drafts[0]}\n\n②${a.drafts[1] || ""}`,
+  }));
+  const client = new line.messagingApi.MessagingApiClient({ channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN });
+  for (const to of await redis.smembers(K.admins)) await client.pushMessage({ to, messages: [head, ...bubbles] }); // 1プッシュ=5吹き出し=1通
 }
 
 (async () => {
-  if (!process.env.X_BEARER_TOKEN) throw new Error("X_BEARER_TOKEN が .env にありません");
+  if (!process.env.X_BEARER_TOKEN) return log("X_BEARER_TOKEN が未設定のためリサーチはスキップ");
+  // 二重起動防止（30分で自動解除）
+  if (!DRY && !(await redis.set(K.lock, Date.now(), { nx: true, ex: 1800 }))) return log("別の実行中のためスキップ");
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const A = await collect("A", today);
+    const B = await collect("B", today);
+    const C = await collect("C", today);
+    log(`取得 A${A.length} B${B.length} C${C.length}（新規のみ）`);
 
-  const found = new Map();
-  for (const q of QUERIES) {
+    // A群: いいね上位＋勢い上位のうち、投稿者のフォロワー数を少数だけ調べて「小規模なのに伸びた」を判定
+    const lookup = [...A].sort((x, y) => y.likes - x.likes).slice(0, AUTHOR_LOOKUPS).map((p) => p.authorId);
     try {
-      for (const t of await search(q)) found.set(t.id, t);
+      const users = await xapi.usersByIds(lookup);
+      for (const p of A) if (users[p.authorId]) p.followers = users[p.authorId].followers;
     } catch (e) {
-      log("検索失敗", q, e.message);
+      log("フォロワー取得スキップ", e.message);
     }
-  }
-  log(`取得 ${found.size}件（重複除外後）`);
-  if (found.size === 0) return;
+    const Asel = [...A].sort((x, y) => velocity(y) - velocity(x)).slice(0, 30);
+    const Bsel = [...B].filter((p) => hoursSince(p.createdAt) <= FRESH_HOURS).sort((x, y) => velocity(y) - velocity(x)).slice(0, 35);
+    const Csel = C.slice(0, 15);
+    if (Asel.length + Bsel.length + Csel.length === 0) return log("新規の投稿なし。終了");
 
-  // まだ見ていない投稿だけを対象にする
-  const ids = [...found.keys()];
-  const seenFlags = await Promise.all(ids.map((id) => redis.sismember(SEEN_KEY, id)));
-  const fresh = ids.filter((_, i) => !seenFlags[i]).map((id) => found.get(id));
-  const byLikes = [...fresh].sort((a, b) => b.likes - a.likes);
+    const results = runClaude(prompt({ A: Asel, B: Bsel, C: Csel }));
+    const get = (id) => results.find((r) => r.id === id);
 
-  const refs = byLikes.slice(0, MAX_NEW_REFS);
-  const cutoff = Date.now() - FRESH_HOURS * 3600 * 1000;
-  const candidates = byLikes.filter((t) => new Date(t.createdAt).getTime() >= cutoff).slice(0, REPLY_CANDIDATES);
-  log(`新規 ${fresh.length}件 → 参考候補 ${refs.length}件 / リプ候補 ${candidates.length}件`);
-  if (refs.length === 0 && candidates.length === 0) return;
-
-  const results = runClaude(buildPrompt(refs, candidates));
-  const byId = Object.fromEntries(results.map((r) => [r.id, r]));
-
-  let saved = 0;
-  for (const [i, r] of refs.entries()) {
-    const a = byId[`R${i + 1}`];
-    if (!a || a.usable === false) continue;
-    const entry = { text: r.text, likes: r.likes, views: r.views, account: r.url, type: a.type, hook: a.hook, why: a.why, savedAt: new Date().toISOString(), source: "research" };
-    if (DRY) log("[dry] 参考", JSON.stringify(entry).slice(0, 200));
-    else await redis.lpush(REFS_KEY, entry);
-    saved++;
-  }
-  if (!DRY) await redis.ltrim(REFS_KEY, 0, 299); // 参考投稿集は最新300件まで
-
-  const replies = candidates
-    .map((c, i) => ({ c, a: byId[`C${i + 1}`] }))
-    .filter(({ a }) => a && !a.skip && Array.isArray(a.drafts));
-  if (replies.length) {
-    const bubbles = replies.map(({ c, a }, i) => ({
-      type: "text",
-      text: `${i === 0 ? "今日のリプ候補だよ（長押しでコピー）\n\n" : ""}【${a.target}】いいね${c.likes}\n${c.url}\n\n${a.drafts.map((d, k) => `${k + 1}) ${d}`).join("\n\n")}`,
-    }));
-    if (DRY) log("[dry] リプ候補", JSON.stringify(bubbles).slice(0, 400));
-    else {
-      const client = new line.messagingApi.MessagingApiClient({ channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN });
-      for (const to of await redis.smembers(ADMINS_KEY)) await client.pushMessage({ to, messages: bubbles.slice(0, 5) });
+    // A → 参考投稿集
+    let refCount = 0;
+    for (const [i, p] of Asel.entries()) {
+      const a = get(`A${i + 1}`);
+      if (!a || a.usable === false) continue;
+      const entry = { text: p.text, likes: p.likes, views: p.views, followers: p.followers ?? null, velocity: Number(velocity(p).toFixed(1)), type: a.type, category: a.category, hook: a.hook, structure: a.structure, emotion: a.emotion, why: a.why, source: "research", savedAt: new Date().toISOString() };
+      if (DRY) log("[dry]A", JSON.stringify(entry).slice(0, 180));
+      else await redis.lpush(K.refs, entry);
+      refCount++;
     }
-  }
+    if (!DRY) await redis.ltrim(K.refs, 0, 299);
 
-  if (!DRY) {
-    for (const t of fresh) await redis.sadd(SEEN_KEY, t.id);
+    // C → 悩み（抽象化したものだけ保存。元の本文・ユーザー情報は保存しない）
+    let worryCount = 0;
+    for (const [i] of Csel.entries()) {
+      const c = get(`C${i + 1}`);
+      if (!c || c.usable === false) continue;
+      const entry = { category: c.category, worry: c.worry, postIdea: c.postIdea, date: today };
+      if (DRY) log("[dry]C", JSON.stringify(entry));
+      else await redis.lpush(K.worries, entry);
+      worryCount++;
+    }
+    if (!DRY) await redis.ltrim(K.worries, 0, 499);
+
+    // B → リプ候補（優先度順に最大5件。1通にまとめて送る）
+    const picks = results
+      .filter((r) => /^B\d+$/.test(r.id) && Array.isArray(r.drafts))
+      .map((a) => ({ a, p: Bsel[Number(a.id.slice(1)) - 1] }))
+      .filter((x) => x.p)
+      .sort((x, y) => x.a.priority - y.a.priority)
+      .slice(0, 5);
+    if (DRY) picks.forEach(({ p, a }) => log("[dry]B", a.priority, p.url, a.summary, "|", a.drafts.join(" / ")));
+    else await notify(picks);
+
+    // 処理済みIDを記録（同じ投稿を翌日以降また分析・推薦しない。30日で消える）
+    if (!DRY) {
+      for (const [g, list] of [["A", A], ["B", B], ["C", C]]) {
+        if (list.length) {
+          await redis.sadd(K.seen(g), ...list.map((p) => p.id));
+          await redis.expire(K.seen(g), 30 * 86400);
+        }
+      }
+      await redis.lpush(K.log, { date: today, A: A.length, B: B.length, C: C.length, refs: refCount, worries: worryCount, replies: picks.length, spent: await xapi.spent() });
+      await redis.ltrim(K.log, 0, 89);
+    }
+    const s = await xapi.spent();
+    log(`完了: 参考${refCount} / 悩み${worryCount} / リプ候補${picks.length}件送信 / X API推定 今日$${s.day.toFixed(3)} 今月$${s.month.toFixed(3)}${DRY ? "（dry）" : ""}`);
+  } finally {
+    if (!DRY) await redis.del(K.lock);
   }
-  log(`完了: 参考投稿${saved}件保存 / リプ候補${replies.length}件送信${DRY ? "（dry）" : ""}`);
-})().catch((e) => {
+})().catch(async (e) => {
   log("エラー:", e.message || e);
   process.exit(1);
 });

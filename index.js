@@ -41,6 +41,32 @@ pages.mount(app);
 app.use("/brand", express.static(require("path").join(__dirname, "public", "brand")));
 
 // LINE内リンクの計測用リダイレクト。初回クリック日時を記録してから公開ページへ飛ばす
+// 相談ボタン（ASPリンク）のクリック記録。ページ側の sendBeacon から呼ばれる
+app.post("/c", async (req, res) => {
+  const k = String(req.query.k || "").slice(0, 20);
+  const p = String(req.query.p || "").slice(0, 60);
+  if (/^(fortune|matching)$/.test(k)) {
+    try {
+      const key = `renai-karte:affclicks:${store.todayISO()}`;
+      await store.hincr(key, `${k}|${p}`);
+    } catch (err) {
+      console.error("[c] 記録失敗", (err && err.message) || err);
+    }
+  }
+  res.status(204).end();
+});
+
+// X投稿内のLINE誘導リンク。どの投稿から来たか(s)を数えてからLINEの友だち追加へ飛ばす
+app.get("/l", async (req, res) => {
+  const s = String(req.query.s || "unknown").replace(/[^\w:.-]/g, "").slice(0, 40);
+  try {
+    await store.hincr(`renai-karte:lineclicks:${store.todayISO()}`, s);
+  } catch (err) {
+    console.error("[l] 記録失敗", (err && err.message) || err);
+  }
+  res.redirect(302, "https://line.me/R/ti/p/@549rcswf");
+});
+
 app.get("/r", async (req, res) => {
   const { u, d, s } = req.query;
   if (!msg.verifyTracked(u, d, s)) return res.redirect(302, "/karte");
