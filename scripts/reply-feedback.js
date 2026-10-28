@@ -6,6 +6,7 @@
 //   3) 共通点の抽出     … 48時間以上たったリプが一定数たまったら、claude -p で「反応が良かった返信」の共通点・
 //                           避けるべき点・人間の手直しの傾向を分析し renai-karte:meta:replyInsights へ
 //   4) 次回への反映     … research.js がリプ文を作るときに replyInsights と実際に送った文を読み込む
+//   5) 会話の続き       … こたへの返信に返す文をAIが1つに確定し、返信画面リンク付きでLINEへ（lib/conversation.js）
 // 費用: 1日あたり最大 50件×$0.005（自分のリプ30＋自分へのリプ20）。予算ガードは lib/xapi.js
 // 使い方: node scripts/reply-feedback.js [--dry] [--analyze]   … --analyze で件数条件に関係なく分析を実行
 require("dotenv").config({ path: require("path").join(__dirname, "..", ".env"), quiet: true });
@@ -14,6 +15,7 @@ const path = require("path");
 const { execFileSync } = require("child_process");
 const { Redis } = require("@upstash/redis");
 const xapi = require("../lib/xapi");
+const { notifyConversations } = require("../lib/conversation");
 
 const DRY = process.argv.includes("--dry");
 const FORCE_ANALYZE = process.argv.includes("--analyze");
@@ -59,9 +61,8 @@ async function ownUserId() {
 async function track() {
   const me = await ownUserId();
   const startTime = new Date(Date.now() - TRACK_HOURS * 3600000).toISOString().replace(/\.\d+Z$/, "Z");
-  const mine = (await xapi.searchRecent(`from:${USERNAME} is:reply`, { maxResults: 30, startTime, sortOrder: "recency" }))
-    .filter((p) => p.inReplyToUserId && p.inReplyToUserId !== me); // 自分のスレッドの続きは除外
-  if (mine.length === 0) return { mine: 0, saved: 0 };
+  const mineRaw = await xapi.searchRecent(`from:${USERNAME} is:reply`, { maxResults: 30, startTime, sortOrder: "recency" });
+  const mine = mineRaw.filter((p) => p.inReplyToUserId && p.inReplyToUserId !== me); // 自分のスレッドの続きは除外
 
   let incoming = [];
   try {
@@ -69,6 +70,15 @@ async function track() {
   } catch (e) {
     log("自分へのリプ取得スキップ", e.message);
   }
+
+  // 会話の続き：こたに来た返信への返信文をLINEに届ける（追加のAPI費用なし）
+  try {
+    const n = await notifyConversations({ incoming, mine: mineRaw, me, dry: DRY, log });
+    if (n) log(`会話の続き ${n}件をLINEに通知${DRY ? "（dry）" : ""}`);
+  } catch (e) {
+    log("会話の続きの通知失敗", e.message);
+  }
+  if (mine.length === 0) return { mine: 0, saved: 0 };
 
   const logs = (await redis.lrange(K.log, 0, -1)) || [];
   const byParent = new Map(logs.map((l) => [String(l.postId), l]));
