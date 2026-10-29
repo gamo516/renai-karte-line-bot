@@ -37,9 +37,9 @@ const GROUPS = {
     { q: `(失恋 OR 既読無視 OR 冷却期間) min_likes:30 ${BASE}`, n: 10 },
   ],
   B: [
-    { q: `(復縁 OR 元彼 OR 元カレ OR 未練) min_likes:5 -has:links ${BASE}`, n: 15, fresh: true },
-    { q: `(片思い OR 脈あり OR 好きな人) min_likes:5 -has:links ${BASE}`, n: 10, fresh: true },
-    { q: `(失恋 OR 既読無視 OR 連絡こない) min_likes:5 -has:links ${BASE}`, n: 10, fresh: true },
+    { q: `(復縁 OR 元彼 OR 元カレ OR 未練) min_likes:5 -has:links -has:media ${BASE}`, n: 15, fresh: true },
+    { q: `(片思い OR 脈あり OR 好きな人) min_likes:5 -has:links -has:media ${BASE}`, n: 10, fresh: true },
+    { q: `(失恋 OR 既読無視 OR 連絡こない) min_likes:5 -has:links -has:media ${BASE}`, n: 10, fresh: true },
   ],
   C: [{ q: `(元彼 OR 復縁 OR 片思い OR 既読無視) (どうしたら OR わからない OR 辛い OR 連絡していい OR 諦め) -has:links ${BASE}`, n: 15 }],
 };
@@ -105,7 +105,13 @@ ${A.map((p, i) => fmt(p, i, "A")).join("\n")}
 ## 作業B：リプ候補の選定（候補${B.length}件から最大5件）
 フォロワー0のこたが、新しい人と接点を作るためのリプ先を選ぶ。
 選ぶ基準: ターゲット（復縁・片思いで悩む20〜30代女性）との一致／新しさ／勢い／こたが自然に価値ある一言を返せるか／返信がプロフィール訪問につながりそうか
-除外: 広告・業者・炎上・誹謗中傷・未成年に見える・性的・暴力・自傷を含む・恋愛と無関係。有望なものがなければ0件でよい
+選ぶのは「投稿した本人が、自分の恋愛（復縁・片思い・曖昧な関係・連絡が途絶えた等）について、今まさに悩んでいる・迷っている・揺れている」投稿だけ。
+除外（selfWorry:false か heavy:true なら選ばない）:
+- 芸能人・有名人・テレビ・ドラマ・漫画・ニュース・他人の恋愛の話題（本人の悩みではない）
+- もう解決・吹っ切れている投稿、自慢・報告・ネタだけの投稿
+- 恋愛の枠を超えた重いテーマ（家族の問題・親の離婚や死別・虐待・DV・ストーカー・心の病気・自傷・妊娠や中絶など）。軽いリプで傷つけるおそれがあるため heavy:true
+- 広告・業者・炎上・誹謗中傷・未成年に見える・性的・恋愛の情報発信アカウントの解説投稿（悩みではなく情報）
+有望なものがなければ0件でよい（無理に埋めない）
 選んだ投稿ごとに、返信文を最終的に1つだけ決める。
 返信文のルール（最優先）:
  - 元投稿の具体的な言葉・状況（出来事、期間、相手の言動、本人の行動など）に必ず1つ触れる。どの投稿にも使い回せる文はNG
@@ -128,7 +134,7 @@ ${C.map((p, i) => `C${i + 1}. ${p.text.replace(/\n/g, " / ")}`).join("\n")}
 
 ## 出力（JSON配列のみ。前置き不要）
 作業A: {"id":"A番号","usable":true/false,"type":"型","category":"empathy|practical|conversation","hook":"冒頭フックの手法(20字)","structure":"文章構成(30字)","emotion":"刺さる感情(20字)","why":"読者が反応する理由(60字)"}
-作業B（選んだものだけ）: {"id":"B番号","priority":1〜5,"reason":"選定理由(40字)","drafts":["内部案1","内部案2","内部案3"],"check":"チェックで直した点・選んだ理由(60字)","final":"最終的な返信文1つ"}
+作業B（選んだものだけ）: {"id":"B番号","selfWorry":true/false,"heavy":true/false,"priority":1〜5,"reason":"選定理由(40字)","drafts":["内部案1","内部案2","内部案3"],"check":"チェックで直した点・選んだ理由(60字)","final":"最終的な返信文1つ"}
 作業C: {"id":"C番号","usable":true/false,"category":"悩みの分類(例: 連絡していいか迷う/別れの理由が分からない/既読無視/行動できない/相手の未練を知りたい/その他)","worry":"抽象化した悩み(40字)","postIdea":"こたの投稿テーマ案(40字)"}`;
 }
 
@@ -197,8 +203,12 @@ async function notify(picks) {
     if (!DRY) await redis.ltrim(K.worries, 0, 499);
 
     // B → リプ候補（優先度順に最大5件。1通にまとめて送る）
+    const notifiedIds = new Set(((await redis.lrange("renai-karte:reply-log", 0, -1)) || []).map((l) => String(l.postId)));
     const picks = results
-      .filter((r) => /^B\d+$/.test(r.id) && typeof r.final === "string" && r.final.trim())
+      // 過去に通知した投稿は二度と通知しない（既読リストが消えても重複しないように）
+      .filter((r) => !notifiedIds.has(String((Bsel[Number(String(r.id).slice(1)) - 1] || {}).id)))
+      // 本人の悩みでないもの・重すぎるテーマは、AIが選んでいても通知しない（二重チェック）
+      .filter((r) => /^B\d+$/.test(r.id) && r.selfWorry === true && r.heavy !== true && typeof r.final === "string" && r.final.trim())
       .map((a) => ({ a, p: Bsel[Number(a.id.slice(1)) - 1] }))
       .filter((x) => x.p)
       .sort((x, y) => x.a.priority - y.a.priority)
