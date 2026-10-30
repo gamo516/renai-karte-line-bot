@@ -11,6 +11,7 @@ const { execFileSync } = require("child_process");
 const line = require("@line/bot-sdk");
 const { Redis } = require("@upstash/redis");
 const replyNotify = require("../lib/replyNotify");
+const { personaText } = require("../lib/persona");
 
 const DRY = process.argv.includes("--dry");
 const redis = Redis.fromEnv();
@@ -77,13 +78,15 @@ async function toMaterial(item, i, imgDir) {
   return { index: i, mode: item.mode, text: item.text, fetched };
 }
 
-function buildPrompt(materials) {
+function buildPrompt(materials, persona = "") {
   return `あなたは恋愛アカウント運用のアシスタントです。運用中のXアカウント「こた」（@kota_0517）の運営者から届いた受付箱の${materials.length}件を処理してください。
 
 ## こたのキャラ
 - 復縁・片思いの相談をたくさん聞いてきたアラサー女性。男友達から聞いた「男の本音」にも詳しい
 - 口調はやわらかいタメ口（「〜だよね」「〜かも」）。説教しない、相手を否定しない、異性を攻撃しない
-- こた自身の具体的な恋愛体験は作らない。占い師・霊能者のふりはしない
+- こたは、別れて復縁して結婚した女性。自分の経験は下の「こたの人物設定」の範囲でだけ語ってよい。占い師・霊能者のふりはしない
+
+${persona}
 
 ## 処理のしかた（mode ごと）
 ### mode=reply（返信案がほしい）
@@ -146,7 +149,7 @@ async function sendReplies(replies) {
     const materials = [];
     for (const [i, item] of items.entries()) materials.push(await toMaterial(item, i + 1, imgDir));
 
-    const results = runClaude(buildPrompt(materials), imgDir);
+    const results = runClaude(buildPrompt(materials, await personaText()), imgDir);
     const replies = [];
     let refCount = 0;
     let accountCount = 0;

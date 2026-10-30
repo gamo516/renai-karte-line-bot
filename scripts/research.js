@@ -12,6 +12,7 @@ const line = require("@line/bot-sdk");
 const { Redis } = require("@upstash/redis");
 const xapi = require("../lib/xapi");
 const replyNotify = require("../lib/replyNotify");
+const { personaText } = require("../lib/persona");
 // --only=B などで一部のグループだけ実行（テスト用。費用を抑えるため）
 const ONLY = (process.argv.find((a) => a.startsWith("--only=")) || "").slice(7).split(",").filter(Boolean);
 
@@ -85,7 +86,7 @@ function insightsText(ins) {
   return lines.join("\n");
 }
 
-function prompt({ A, B, C, recent = [], insights = null }) {
+function prompt({ A, B, C, recent = [], insights = null, persona = "" }) {
   const fmt = (p, i, tag) =>
     `${tag}${i + 1}. [投稿${hoursSince(p.createdAt).toFixed(1)}時間前 / いいね${p.likes} 返信${p.replies} 引用${p.quotes} 保存${p.bookmarks ?? "?"} 表示${p.views ?? "?"}${p.followers != null ? ` / 投稿者フォロワー${p.followers}` : ""} / 勢い${velocity(p).toFixed(1)}/h] ${p.text.replace(/\n/g, " / ")}`;
   return `あなたは恋愛系Xアカウント「こた」（@kota_0517）の運用チームです。今日集めたXの投稿を3つの作業で処理してください。
@@ -93,7 +94,9 @@ function prompt({ A, B, C, recent = [], insights = null }) {
 ## こた
 - 復縁・片思いの相談をたくさん聞いてきたアラサー女性。男友達から聞いた「男の本音」にも詳しい
 - 口調はやわらかいタメ口。説教しない、相手を否定しない、異性を攻撃しない、相手の心理を根拠なく断定しない
-- こた自身の恋愛体験や相談実績を作らない。占い師・霊能者のふりはしない
+- こたは、別れて復縁して結婚した女性。自分の経験は下の「こたの人物設定」の範囲でだけ語ってよい。占い師・霊能者のふりはしない
+
+${persona}
 
 ## 作業A：バズ投稿の分析（${A.length}件）
 伸びた理由を分析する。いいね数だけでなく、投稿者のフォロワーが少ないのに伸びている投稿（フォロワーに対していいねが多い）を重視する。
@@ -175,7 +178,7 @@ async function notify(picks) {
     if (Asel.length + Bsel.length + Csel.length === 0) return log("新規の投稿なし。終了");
 
     const insights = await redis.get("renai-karte:meta:replyInsights");
-    const results = runClaude(prompt({ A: Asel, B: Bsel, C: Csel, recent: await replyNotify.recentReplies(), insights }));
+    const results = runClaude(prompt({ A: Asel, B: Bsel, C: Csel, recent: await replyNotify.recentReplies(), insights, persona: await personaText() }));
     const get = (id) => results.find((r) => r.id === id);
 
     // A → 参考投稿集
